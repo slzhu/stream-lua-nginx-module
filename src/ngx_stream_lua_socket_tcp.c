@@ -2104,8 +2104,17 @@ ngx_stream_lua_socket_tcp_peekuntil_resume(ngx_stream_lua_request_t *r)
         ngx_log_debug0(NGX_LOG_DEBUG_STREAM, r->connection->log, 0,
                      "lua peekuntil does not matched, returning NGX_AGAIN");
 
+        u->pos = c->buffer->last - u->pat.len + 1;
+        if(u->pos < c->buffer->pos) {
+            u->pos = c->buffer->pos;
+        }
+
         return ngx_stream_lua_run_posted_threads(c, vm, r, ctx, nreqs);
     }
+
+    u->pos = NULL;
+    u->pat.data = NULL;
+    u->pat.len = 0;
 
     ctx->resume_handler = ngx_stream_lua_wev_handler;
     /* read handler might have been changed by ngx_stream_core_preread_phase */
