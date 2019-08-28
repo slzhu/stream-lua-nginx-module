@@ -1860,7 +1860,6 @@ ngx_stream_lua_socket_tcp_prereceive_resume(ngx_stream_lua_request_t *r)
     ngx_uint_t                           nreqs;
     ngx_connection_t                    *c;
     ngx_stream_lua_ctx_t                *ctx;
-    size_t                               size;
 
     ngx_stream_lua_socket_tcp_upstream_t            *u;
 
