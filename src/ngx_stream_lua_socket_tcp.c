@@ -1795,6 +1795,9 @@ ngx_stream_lua_socket_tcp_peek(lua_State *L)
     int                                  n;
     lua_Integer                          bytes;
     size_t                               size;
+    int                                  typ;
+    ngx_str_t                            pat;
+    char                                *p;
 
     ngx_stream_lua_socket_tcp_upstream_t        *u;
 
@@ -1845,8 +1848,49 @@ ngx_stream_lua_socket_tcp_peek(lua_State *L)
 
     ngx_stream_lua_socket_check_busy_reading(r, u, L);
 
-    if (!lua_isnumber(L, 2)) {
-        return luaL_error(L, "argument must be a number");
+
+    if (lua_isnumber(L, 2)) {
+        typ = LUA_TNUMBER;
+    } else {
+        typ = lua_type(L, 2);
+    }
+
+    switch (typ) {
+    case LUA_TSTRING:
+        pat.data = (u_char *) luaL_checklstring(L, 2, &pat.len);
+        if (pat.len != 2 || pat.data[0] != '*') {
+            p = (char *) lua_pushfstring(L, "bad pattern argument: %s",
+                                         (char *) pat.data);
+
+            return luaL_argerror(L, 2, p);
+        }
+
+        switch (pat.data[1]) {
+        case 'l':
+            if (c->buffer != NULL) {
+                size = c->buffer->last - c->buffer->pos;
+
+                lua_pushlstring(L, (char *) c->buffer->pos, u->length);
+                return 1;
+            } else {
+            	lua_pushnil(L);
+            	return 1;
+            }
+
+            break;
+        default:
+            return luaL_argerror(L, 2, "bad pattern argument");
+            break;
+        }
+
+        break;
+
+    case LUA_TNUMBER:
+    	break;
+
+    default:
+        return luaL_argerror(L, 2, "bad pattern argument");
+        break;
     }
 
     bytes = lua_tointeger(L, 2);
