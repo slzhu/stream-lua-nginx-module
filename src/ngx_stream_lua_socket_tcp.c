@@ -163,6 +163,11 @@ static void ngx_stream_lua_socket_tcp_close_connection(ngx_connection_t *c);
 static int ngx_stream_lua_socket_tcp_peek(lua_State *L);
 static ngx_int_t ngx_stream_lua_socket_tcp_peek_resume(ngx_stream_lua_request_t *r);
 
+static int ngx_stream_lua_socket_tcp_peekuntil(lua_State *L);
+static ngx_int_t ngx_stream_lua_socket_tcp_peekuntil_resume(ngx_stream_lua_request_t *r);
+
+static int ngx_stream_lua_socket_tcp_prereceive(lua_State *L);
+static ngx_int_t ngx_stream_lua_socket_tcp_prereceive_resume(ngx_stream_lua_request_t *r);
 
 enum {
     SOCKET_CTX_INDEX = 1,
@@ -258,10 +263,16 @@ ngx_stream_lua_inject_socket_tcp_api(ngx_log_t *log, lua_State *L)
     /* {{{raw req socket object metatable */
     lua_pushlightuserdata(L, ngx_stream_lua_lightudata_mask(
                           raw_req_socket_metatable_key));
-    lua_createtable(L, 0 /* narr */, 7 /* nrec */);
+    lua_createtable(L, 0 /* narr */, 9 /* nrec */);
 
     lua_pushcfunction(L, ngx_stream_lua_socket_tcp_peek);
     lua_setfield(L, -2, "peek");
+
+    lua_pushcfunction(L, ngx_stream_lua_socket_tcp_peekuntil);
+    lua_setfield(L, -2, "peekuntil");
+
+    lua_pushcfunction(L, ngx_stream_lua_socket_tcp_prereceive);
+    lua_setfield(L, -2, "prereceive");
 
     lua_pushcfunction(L, ngx_stream_lua_socket_tcp_receive);
     lua_setfield(L, -2, "receive");
@@ -1780,6 +1791,126 @@ ngx_stream_lua_socket_tcp_conn_retval_handler(ngx_stream_lua_request_t *r,
 
 
 static int
+ngx_stream_lua_socket_tcp_prereceive(lua_State *L)
+{
+    ngx_stream_lua_request_t            *r;
+    ngx_stream_lua_ctx_t                *ctx;
+    ngx_stream_lua_loc_conf_t           *llcf;
+    ngx_stream_lua_co_ctx_t             *coctx;
+
+    ngx_stream_lua_socket_tcp_upstream_t        *u;
+
+	r = ngx_stream_lua_get_req(L);
+	if (r == NULL) {
+		return luaL_error(L, "no request found");
+	}
+
+	ctx = ngx_stream_lua_get_module_ctx(r, ngx_stream_lua_module);
+	ngx_stream_lua_check_context(L, ctx, NGX_STREAM_LUA_CONTEXT_PREREAD);
+
+    ngx_log_debug0(NGX_LOG_DEBUG_STREAM, r->connection->log, 0,
+                   "stream lua tcp socket calling prereceive() method");
+
+    luaL_checktype(L, 1, LUA_TTABLE);
+
+    lua_rawgeti(L, 1, SOCKET_CTX_INDEX);
+    u = lua_touserdata(L, -1);
+
+    if (u == NULL) {
+        llcf = ngx_stream_lua_get_module_loc_conf(r, ngx_stream_lua_module);
+
+        if (llcf->log_socket_errors) {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                          "attempt to peek data on a closed socket: u:%p", u);
+        }
+
+        lua_pushnil(L);
+        lua_pushliteral(L, "closed");
+        return 2;
+    }
+
+    if (u->request != r) {
+        return luaL_error(L, "bad request");
+    }
+
+    ngx_stream_lua_socket_check_busy_reading(r, u, L);
+
+    coctx = ctx->cur_co_ctx;
+
+    ngx_stream_lua_cleanup_pending_operation(coctx);
+    coctx->cleanup = ngx_stream_lua_coctx_cleanup;
+    coctx->data = u;
+
+    dd("setting data to %p, coctx:%p", u, coctx);
+
+    ctx->downstream = u;
+    ctx->resume_handler = ngx_stream_lua_socket_tcp_prereceive_resume;
+    ctx->peek_needs_more_data = 1;
+    u->read_co_ctx = coctx;
+    u->read_waiting = 1;
+
+    return lua_yield(L, 0);
+}
+
+static ngx_int_t
+ngx_stream_lua_socket_tcp_prereceive_resume(ngx_stream_lua_request_t *r)
+{
+    lua_State                           *vm;
+    ngx_int_t                            rc;
+    ngx_uint_t                           nreqs;
+    ngx_connection_t                    *c;
+    ngx_stream_lua_ctx_t                *ctx;
+
+    ngx_stream_lua_socket_tcp_upstream_t            *u;
+
+    ngx_log_debug0(NGX_LOG_DEBUG_STREAM, r->connection->log, 0,
+                   "stream lua tcp socket resuming prereceive");
+
+    ctx = ngx_stream_lua_get_module_ctx(r, ngx_stream_lua_module);
+    if (ctx == NULL) {
+        return NGX_ERROR;
+    }
+
+    dd("coctx: %p", ctx->cur_co_ctx);
+
+    u = ctx->downstream;
+    c = r->connection;
+    vm = ngx_stream_lua_get_lua_vm(r, ctx);
+    nreqs = c->requests;
+
+    ctx->resume_handler = ngx_stream_lua_wev_handler;
+    /* read handler might have been changed by ngx_stream_core_preread_phase */
+    r->connection->read->handler = ngx_stream_lua_request_handler;
+
+    lua_pushboolean(u->read_co_ctx->co, 1);
+
+    u->read_co_ctx->cleanup = NULL;
+    ctx->cur_co_ctx = u->read_co_ctx;
+    u->read_co_ctx = NULL;
+    ctx->peek_needs_more_data = 0;
+    u->read_waiting = 0;
+
+    ngx_log_debug0(NGX_LOG_DEBUG_STREAM, r->connection->log, 0,
+                   "lua tcp operation done, resuming lua thread");
+
+    rc = ngx_stream_lua_run_thread(vm, r, ctx, 1);
+
+    ngx_log_debug1(NGX_LOG_DEBUG_STREAM, r->connection->log, 0,
+                   "lua run thread returned %d", rc);
+
+    if (rc == NGX_AGAIN) {
+        return ngx_stream_lua_run_posted_threads(c, vm, r, ctx, nreqs);
+    }
+
+    if (rc == NGX_DONE) {
+        ngx_stream_lua_finalize_request(r, NGX_DONE);
+        return ngx_stream_lua_run_posted_threads(c, vm, r, ctx, nreqs);
+    }
+
+    return rc;
+}
+
+static int
 ngx_stream_lua_socket_tcp_peek(lua_State *L)
 {
     ngx_stream_lua_request_t            *r;
@@ -1790,6 +1921,9 @@ ngx_stream_lua_socket_tcp_peek(lua_State *L)
     int                                  n;
     lua_Integer                          bytes;
     size_t                               size;
+    int                                  typ;
+    ngx_str_t                            pat;
+    char                                *p;
 
     ngx_stream_lua_socket_tcp_upstream_t        *u;
 
@@ -1840,8 +1974,48 @@ ngx_stream_lua_socket_tcp_peek(lua_State *L)
 
     ngx_stream_lua_socket_check_busy_reading(r, u, L);
 
-    if (!lua_isnumber(L, 2)) {
-        return luaL_error(L, "argument must be a number");
+    if (lua_isnumber(L, 2)) {
+        typ = LUA_TNUMBER;
+    } else {
+        typ = lua_type(L, 2);
+    }
+
+    switch (typ) {
+    case LUA_TSTRING:
+        pat.data = (u_char *) luaL_checklstring(L, 2, &pat.len);
+        if (pat.len != 2 || pat.data[0] != '*') {
+            p = (char *) lua_pushfstring(L, "bad pattern argument: %s",
+                                         (char *) pat.data);
+
+            return luaL_argerror(L, 2, p);
+        }
+
+        switch (pat.data[1]) {
+        case 'a':
+            if (c->buffer != NULL) {
+                size = c->buffer->last - c->buffer->pos;
+
+                lua_pushlstring(L, (char *) c->buffer->pos, size);
+                return 1;
+            } else {
+            	lua_pushnil(L);
+            	return 1;
+            }
+
+            break;
+        default:
+            return luaL_argerror(L, 2, "bad pattern argument");
+            break;
+        }
+
+        break;
+
+    case LUA_TNUMBER:
+    	break;
+
+    default:
+        return luaL_argerror(L, 2, "bad pattern argument");
+        break;
     }
 
     bytes = lua_tointeger(L, 2);
@@ -1905,7 +2079,7 @@ ngx_stream_lua_socket_tcp_peek_resume(ngx_stream_lua_request_t *r)
         return NGX_ERROR;
     }
 
-    dd("coctx: %p", coctx);
+    dd("coctx: %p", ctx->cur_co_ctx);
 
     u = ctx->downstream;
     c = r->connection;
@@ -1953,6 +2127,196 @@ ngx_stream_lua_socket_tcp_peek_resume(ngx_stream_lua_request_t *r)
     return rc;
 }
 
+static int
+ngx_stream_lua_socket_tcp_peekuntil(lua_State *L)
+{
+    ngx_stream_lua_request_t            *r;
+    ngx_connection_t                    *c;
+    ngx_stream_lua_ctx_t                *ctx;
+    ngx_stream_lua_loc_conf_t           *llcf;
+    ngx_stream_lua_co_ctx_t             *coctx;
+    int                                  n;
+    size_t                               size;
+    u_char                              *matched;
+
+    ngx_stream_lua_socket_tcp_upstream_t        *u;
+
+    r = ngx_stream_lua_get_req(L);
+    if (r == NULL) {
+        return luaL_error(L, "no request found");
+    }
+
+    ctx = ngx_stream_lua_get_module_ctx(r, ngx_stream_lua_module);
+    ngx_stream_lua_check_context(L, ctx, NGX_STREAM_LUA_CONTEXT_PREREAD);
+
+    n = lua_gettop(L);
+    if (n != 2) {
+        return luaL_error(L, "expecting 2 arguments "
+                          "(including the object), but got %d", n);
+    }
+
+    ngx_log_debug0(NGX_LOG_DEBUG_STREAM, r->connection->log, 0,
+                   "stream lua tcp socket calling peekuntil() method");
+
+    luaL_checktype(L, 1, LUA_TTABLE);
+
+    lua_rawgeti(L, 1, SOCKET_CTX_INDEX);
+    u = lua_touserdata(L, -1);
+
+    if (u == NULL) {
+        llcf = ngx_stream_lua_get_module_loc_conf(r, ngx_stream_lua_module);
+
+        if (llcf->log_socket_errors) {
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                          "attempt to peek data on a closed socket: u:%p", u);
+        }
+
+        lua_pushnil(L);
+        lua_pushliteral(L, "closed");
+        return 2;
+    }
+
+    //TODO Maybe need support peek on a consumed socket
+    if (u->read_consumed) {
+        return luaL_error(L, "attempt to peek on a consumed socket");
+    }
+
+    c = u->peer.connection;
+
+    if (u->request != r) {
+        return luaL_error(L, "bad request");
+    }
+
+    ngx_stream_lua_socket_check_busy_reading(r, u, L);
+
+    if (!lua_isstring(L, 2)) {
+        return luaL_error(L, "argument 2 must be a string");
+    }
+
+    u->pat.data = (u_char *) lua_tolstring(L, 2, &u->pat.len);
+    if (u->pat.len == 0) {
+        lua_pushnil(L);
+        lua_pushliteral(L, "pattern is empty");
+        return 2;
+    }
+
+    if (c->buffer != NULL) {
+        size = c->buffer->last - c->buffer->pos;
+        matched = ngx_strnstr(c->buffer->pos, (char *)u->pat.data, size);
+
+        if (matched) {
+            lua_pushlstring(L, (char *) c->buffer->pos, 
+                                        matched - c->buffer->pos + u->pat.len);
+            return 1;
+        }
+
+        u->pos = c->buffer->last - u->pat.len + 1;
+        if(u->pos < c->buffer->pos) {
+            u->pos = c->buffer->pos;
+        }
+    }
+
+    /* not enough data in the preread buffer */
+
+    coctx = ctx->cur_co_ctx;
+
+    ngx_stream_lua_cleanup_pending_operation(coctx);
+    coctx->cleanup = ngx_stream_lua_coctx_cleanup;
+    coctx->data = u;
+
+    dd("setting data to %p, coctx:%p", u, coctx);
+
+    ctx->downstream = u;
+    ctx->resume_handler = ngx_stream_lua_socket_tcp_peekuntil_resume;
+    ctx->peek_needs_more_data = 1;
+    u->read_co_ctx = coctx;
+    u->read_waiting = 1;
+
+    return lua_yield(L, 0);
+}
+static ngx_int_t
+ngx_stream_lua_socket_tcp_peekuntil_resume(ngx_stream_lua_request_t *r)
+{
+    lua_State                           *vm;
+    ngx_int_t                            rc;
+    ngx_uint_t                           nreqs;
+    ngx_connection_t                    *c;
+    ngx_stream_lua_ctx_t                *ctx;
+    size_t                               size;
+    u_char                              *matched;
+
+    ngx_stream_lua_socket_tcp_upstream_t            *u;
+
+    ngx_log_debug0(NGX_LOG_DEBUG_STREAM, r->connection->log, 0,
+                   "stream lua tcp socket resuming peek");
+
+    ctx = ngx_stream_lua_get_module_ctx(r, ngx_stream_lua_module);
+    if (ctx == NULL) {
+        return NGX_ERROR;
+    }
+
+    u = ctx->downstream;
+    c = r->connection;
+    vm = ngx_stream_lua_get_lua_vm(r, ctx);
+    nreqs = c->requests;
+
+    dd("coctx: %p", u->read_co_ctx);
+
+    if(!u->pos){
+        u->pos = c->buffer->pos;
+    }
+    size = c->buffer->last - u->pos;
+
+    matched = ngx_strnstr(u->pos, (char*)u->pat.data, size);
+    if (!matched)
+    {
+        ngx_log_debug0(NGX_LOG_DEBUG_STREAM, r->connection->log, 0,
+                     "lua peekuntil does not matched, returning NGX_AGAIN");
+
+        u->pos = c->buffer->last - u->pat.len + 1;
+        if(u->pos < c->buffer->pos) {
+            u->pos = c->buffer->pos;
+        }
+
+        return ngx_stream_lua_run_posted_threads(c, vm, r, ctx, nreqs);
+    }
+
+    u->pos = NULL;
+    u->pat.data = NULL;
+    u->pat.len = 0;
+
+    ctx->resume_handler = ngx_stream_lua_wev_handler;
+    /* read handler might have been changed by ngx_stream_core_preread_phase */
+    r->connection->read->handler = ngx_stream_lua_request_handler;
+
+    lua_pushlstring(u->read_co_ctx->co, (char *) c->buffer->pos, 
+                                    matched - c->buffer->pos + u->pat.len);
+
+    u->read_co_ctx->cleanup = NULL;
+    ctx->cur_co_ctx = u->read_co_ctx;
+    u->read_co_ctx = NULL;
+    ctx->peek_needs_more_data = 0;
+    u->read_waiting = 0;
+
+    ngx_log_debug0(NGX_LOG_DEBUG_STREAM, r->connection->log, 0,
+                   "lua tcp operation done, resuming lua thread");
+
+    rc = ngx_stream_lua_run_thread(vm, r, ctx, 1);
+
+    ngx_log_debug1(NGX_LOG_DEBUG_STREAM, r->connection->log, 0,
+                   "lua run thread returned %d", rc);
+
+    if (rc == NGX_AGAIN) {
+        return ngx_stream_lua_run_posted_threads(c, vm, r, ctx, nreqs);
+    }
+
+    if (rc == NGX_DONE) {
+        ngx_stream_lua_finalize_request(r, NGX_DONE);
+        return ngx_stream_lua_run_posted_threads(c, vm, r, ctx, nreqs);
+    }
+
+    return rc;
+}
 
 static int
 ngx_stream_lua_socket_tcp_receive(lua_State *L)

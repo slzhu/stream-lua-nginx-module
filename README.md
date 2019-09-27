@@ -366,7 +366,9 @@ until (not data and not partial) or ngx.time() >= deadline
 
 reqsock:peek
 ------------
-**syntax:** *ok, err = reqsock:peek(size)*
+**syntax:** *data, err = reqsock:peek(size)*
+
+**syntax:** *data, err = reqsock:peek(pattern)*
 
 **context:** *preread_by_lua&#42;*
 
@@ -374,7 +376,11 @@ Peeks into the [preread](https://nginx.org/en/docs/stream/stream_processing.html
 buffer that contains downstream data sent by the client without consuming them.
 That is, data returned by this API will still be forwarded to upstream in later phases.
 
-This function takes a single required argument, `size`, which is the number of bytes to be peeked.
+This function takes a single required argument, `size` or `pattern`:
+
+- `size`, which is the number of bytes to be peeked.
+- `pattern`, current only support `*a`, which means get all the data in the buffer. Return nil if the buffer is NULL.
+
 Repeated calls to this function always returns data from the beginning of the preread buffer.
 
 Note that preread phase happens after TLS handshake. If the stream server was configured with
@@ -418,6 +424,27 @@ ngx.log(ngx.INFO, "payload is: ", payload)
 ```
 
 This API was first introduced in the `v0.0.6` release.
+
+[Back to TOC](#directives)
+
+reqsock:peekuntil
+------------
+**syntax:** *data, err = reqsock:peekuntil(pattern)*
+
+**context:** *preread_by_lua&#42;*
+
+Like peek method, but get the data until it sees the specified pattern or an error occurs.
+The returned data includes the pattern string.
+
+[Back to TOC](#directives)
+
+reqsock:prereceive
+------------
+**syntax:** *ok, err = reqsock:prereceive()*
+
+**context:** *preread_by_lua&#42;*
+
+Like receive method, receive data to the cache buffer, but don't consume the data.
 
 [Back to TOC](#directives)
 
