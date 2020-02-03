@@ -1920,6 +1920,7 @@ ngx_stream_lua_socket_tcp_peek(lua_State *L)
     ngx_stream_lua_co_ctx_t             *coctx;
     int                                  n;
     lua_Integer                          bytes;
+    lua_Integer                          init = 0;
     size_t                               size;
     int                                  typ;
     ngx_str_t                            pat;
@@ -1936,15 +1937,25 @@ ngx_stream_lua_socket_tcp_peek(lua_State *L)
     ngx_stream_lua_check_context(L, ctx, NGX_STREAM_LUA_CONTEXT_PREREAD);
 
     n = lua_gettop(L);
-    if (n != 2) {
-        return luaL_error(L, "expecting 2 arguments "
+    if (n != 2 && n != 3) {
+        return luaL_error(L, "expecting 2 or 3 arguments "
                           "(including the object), but got %d", n);
     }
-
+    
     ngx_log_debug0(NGX_LOG_DEBUG_STREAM, r->connection->log, 0,
                    "stream lua tcp socket calling peek() method");
 
     luaL_checktype(L, 1, LUA_TTABLE);
+    if (n == 3) {
+        if (lua_isnumber(L, 3)) {
+            init = lua_tointeger(L, 3) - 1;
+            if (init < 0) {
+                return luaL_argerror(L, 3, "init shoud be larger than 0");
+            }
+        } else {
+            return luaL_argerror(L, 3, "bad init argument");
+        }
+    }
 
     lua_rawgeti(L, 1, SOCKET_CTX_INDEX);
     u = lua_touserdata(L, -1);
@@ -1995,7 +2006,7 @@ ngx_stream_lua_socket_tcp_peek(lua_State *L)
             if (c->buffer != NULL) {
                 size = c->buffer->last - c->buffer->pos;
 
-                lua_pushlstring(L, (char *) c->buffer->pos, size);
+                lua_pushlstring(L, (char *) c->buffer->pos + init, size - init);
                 return 1;
             } else {
             	lua_pushnil(L);
@@ -2029,12 +2040,13 @@ ngx_stream_lua_socket_tcp_peek(lua_State *L)
     }
 
     u->length = (size_t) bytes;
+    u->init = (size_t) init;
 
     if (c->buffer != NULL) {
         size = c->buffer->last - c->buffer->pos;
 
-        if (size >= u->length) {
-            lua_pushlstring(L, (char *) c->buffer->pos, u->length);
+        if (size >= u->length + u->init) {
+            lua_pushlstring(L, (char *) c->buffer->pos + u->init, u->length);
             return 1;
         }
     }
@@ -2088,7 +2100,7 @@ ngx_stream_lua_socket_tcp_peek_resume(ngx_stream_lua_request_t *r)
 
     size = c->buffer->last - c->buffer->pos;
 
-    if (size < u->length) {
+    if (size < u->length + u->init) {
         ngx_log_debug0(NGX_LOG_DEBUG_STREAM, r->connection->log, 0,
                      "lua peek does not have enough data, returning NGX_AGAIN");
 
@@ -2099,7 +2111,7 @@ ngx_stream_lua_socket_tcp_peek_resume(ngx_stream_lua_request_t *r)
     /* read handler might have been changed by ngx_stream_core_preread_phase */
     r->connection->read->handler = ngx_stream_lua_request_handler;
 
-    lua_pushlstring(u->read_co_ctx->co, (char *) c->buffer->pos, u->length);
+    lua_pushlstring(u->read_co_ctx->co, (char *) c->buffer->pos + u->init, u->length);
 
     u->read_co_ctx->cleanup = NULL;
     ctx->cur_co_ctx = u->read_co_ctx;

@@ -84,8 +84,9 @@ struct ngx_stream_lua_socket_tcp_upstream_s {
     ngx_buf_t                        buffer; /* receive buffer */
 
     size_t                           length;
+    size_t                           init;
     size_t                           rest;
-    
+
     ngx_str_t                        pat;
     u_char                          *pos;
 
