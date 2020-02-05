@@ -2293,16 +2293,16 @@ ngx_stream_lua_socket_tcp_peekuntil_resume(ngx_stream_lua_request_t *r)
         return ngx_stream_lua_run_posted_threads(c, vm, r, ctx, nreqs);
     }
 
-    u->pos = NULL;
-    u->pat.data = NULL;
-    u->pat.len = 0;
-
     ctx->resume_handler = ngx_stream_lua_wev_handler;
     /* read handler might have been changed by ngx_stream_core_preread_phase */
     r->connection->read->handler = ngx_stream_lua_request_handler;
 
     lua_pushlstring(u->read_co_ctx->co, (char *) c->buffer->pos, 
                                     matched - c->buffer->pos + u->pat.len);
+
+    u->pos = NULL;
+    u->pat.data = NULL;
+    u->pat.len = 0;
 
     u->read_co_ctx->cleanup = NULL;
     ctx->cur_co_ctx = u->read_co_ctx;
