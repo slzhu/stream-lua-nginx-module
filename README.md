@@ -366,9 +366,9 @@ until (not data and not partial) or ngx.time() >= deadline
 
 reqsock:peek
 ------------
-**syntax:** *data, err = reqsock:peek(size)*
+**syntax:** *data, err = reqsock:peek(size, init?)*
 
-**syntax:** *data, err = reqsock:peek(pattern)*
+**syntax:** *data, err = reqsock:peek(pattern, init?)*
 
 **context:** *preread_by_lua&#42;*
 
@@ -380,6 +380,10 @@ This function takes a single required argument, `size` or `pattern`:
 
 - `size`, which is the number of bytes to be peeked.
 - `pattern`, current only support `*a`, which means get all the data in the buffer. Return nil if the buffer is NULL.
+
+A optional argument `init`:
+
+- `init`, numerical value specifies where to start to peek; its default value is 1.
 
 Repeated calls to this function always returns data from the beginning of the preread buffer.
 
